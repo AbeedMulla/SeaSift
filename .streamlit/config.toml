@@ -1,0 +1,31 @@
+# Keep SeaSift private to this laptop.
+[server]
+address = "localhost"     # only this computer can open the app
+maxUploadSize = 4000      # MB. For bigger files, copy them into data/videos instead.
+
+[browser]
+gatherUsageStats = false  # Streamlit sends no usage data anywhere
+
+[client]
+toolbarMode = "minimal"   # hides Streamlit's "Deploy" (cloud) button: this app never goes online
+
+# Ocean look. Built-in fonts only, so it looks the same with Wi-Fi off.
+[theme]
+base = "light"
+primaryColor = "#0E7490"              # deep teal: buttons, toggles, progress bars
+backgroundColor = "#F7FAFC"
+secondaryBackgroundColor = "#E7F1F5"  # pale sea: inputs and cards
+textColor = "#0F172A"
+linkColor = "#0E7490"
+borderColor = "#CFE0E8"
+showWidgetBorder = true
+baseRadius = "0.75rem"
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+chartCategoricalColors = ["#0E7490", "#F59E0B", "#DC2626", "#475569", "#7C3AED", "#16A34A"]
+
+[theme.sidebar]
+backgroundColor = "#0B2545"           # deep navy
+secondaryBackgroundColor = "#13315C"
+textColor = "#E2EEF3"
+primaryColor = "#2DD4BF"              # bright teal for the selected page
+borderColor = "#1E3A5F"

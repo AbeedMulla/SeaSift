@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Results (made by the app) and big files
+data/seasift.db
+data/thumbs/
+data/crops/
+data/clips/
+data/label_photos/
+data/count_frames/
+data/species_lists/*_private.csv
+PROJECT_CONTEXT.md
+data/demo/
+data/_smoke/
+data/check_ai_crop.jpg
+data/videos/*
+!data/videos/.gitkeep
+models/*
+!models/README.md
+
+# CodeCarbon / OS junk
+emissions.csv
+.DS_Store
+CLAUDE.md

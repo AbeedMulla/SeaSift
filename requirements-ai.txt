@@ -1,0 +1,4 @@
+# Tier 1 (optional local AI). Install on the demo laptop while you still have internet.
+# Both pull in PyTorch automatically.
+ultralytics   # runs the Community Fish Detector (AGPL-3.0)
+pybioclip     # BioCLIP species suggestions (MIT)

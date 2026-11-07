@@ -1,0 +1,8 @@
+# Tier 0 (classical computer vision, no trained models). Enough for triage, visibility,
+# review and reports.
+opencv-python>=4.8
+numpy
+pandas
+streamlit>=1.55   # 1.55+ has keyboard shortcuts on buttons
+codecarbon
+streamlit-image-coordinates>=0.4   # click on a frame to count (MIT)
