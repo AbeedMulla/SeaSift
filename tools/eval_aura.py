@@ -1,4 +1,4 @@
-"""Test SeaSift on real underwater video: the AURA dataset (Denmark, CC BY 4.0).
+"""Test seaSEArch on real underwater video: the AURA dataset (Denmark, CC BY 4.0).
 
 AURA has 25 real videos. Scene A is a harbour 11 m deep, where light, visibility and marine snow
 change from clip to clip. Scene B is a camera on a bridge, 9 m deep, lit by artificial light, in brackish water.
@@ -10,7 +10,7 @@ consensus_events.csv holds the average of their start and end frames: our answer
 2. Run:  python tools/eval_aura.py            (or give another folder: python tools/eval_aura.py FOLDER)
 
 Each video gets the same triage as the app (nothing is saved). For each one it prints:
-did SeaSift find the moment people marked, how much of that moment it kept, how much footage
+did seaSEArch find the moment people marked, how much of that moment it kept, how much footage
 it skipped, and how many extra moments it made where nobody marked anything.
 
 Credit on slides: AURA dataset, Weihl, Bengtson, Novak & Pedersen (2025), ICCV Workshops. CC BY 4.0.
@@ -23,11 +23,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from seasift import config  # noqa: E402
-from seasift.pipeline import scan_video  # noqa: E402
-from seasift.triage import build_events  # noqa: E402
-from seasift.video import video_info  # noqa: E402
-from seasift.visibility import label_for  # noqa: E402
+from seasearch import config  # noqa: E402
+from seasearch.pipeline import scan_video  # noqa: E402
+from seasearch.triage import build_events  # noqa: E402
+from seasearch.video import video_info  # noqa: E402
+from seasearch.visibility import label_for  # noqa: E402
 
 DOWNLOAD_PAGE = "https://zenodo.org/records/18139275"
 CREDIT = "AURA dataset: Weihl, Bengtson, Novak & Pedersen (2025), ICCV Workshops. CC BY 4.0."
@@ -63,7 +63,7 @@ def overlap(a, b):
 
 
 def score_video(path, start_frame, end_frame, label_frames=None):
-    """Scan one video and compare SeaSift's moments with the moment people marked."""
+    """Scan one video and compare seaSEArch's moments with the moment people marked."""
     fps, n_frames, video_s = video_info(path)
 
     # Frame number -> seconds. If the labels count a different number of frames than the
@@ -144,12 +144,12 @@ def print_results(results):
     print("Note: AURA clips are short and cut around the action, so 'skipped' is lower here than it"
           " would be on hours of survey footage where fish are rare.")
     print(f"\nSlide line: on {n} real underwater videos from Denmark, each marked by 16 people,"
-          f" SeaSift found {found} of {n} marked moments and skipped {skipped:.0%} of the footage.")
+          f" seaSEArch found {found} of {n} marked moments and skipped {skipped:.0%} of the footage.")
     print(f"Credit: {CREDIT}")
 
 
 def main():
-    p = argparse.ArgumentParser(description="Score SeaSift on real AURA underwater videos.")
+    p = argparse.ArgumentParser(description="Score seaSEArch on real AURA underwater videos.")
     p.add_argument("folder", nargs="?", default=str(config.VIDEO_DIR),
                    help="folder with AURA videos (v00.mp4 ...) and consensus_events.csv")
     args = p.parse_args()

@@ -122,7 +122,7 @@ def build_report_html(conn, video_id):
     generated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>SeaSift report: {e(video.filename)}</title>
+<title>seaSEArch report: {e(video.filename)}</title>
 <style>
  body {{ font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color:#1a1a1a;
         max-width: 1000px; margin: 24px auto; padding: 0 16px; line-height: 1.5; }}
@@ -149,7 +149,7 @@ def build_report_html(conn, video_id):
 <div class="meta">Video: <strong>{e(video.filename)}</strong> · Site list: {e(video.site or "none")}
  · Survey date: {e(sightings.survey_day(video))}
  · Processed: {e(str(video.processed_at).replace("T", " "))} · Report made: {generated}<br>
- Made offline by SeaSift on this computer. Local AI used: {"yes" if video.ai_used else "no"}.</div>
+ Made offline by seaSEArch on this computer. Local AI used: {"yes" if video.ai_used else "no"}.</div>
 
 <div class="cards">
  <div class="card"><div class="n">{video.duration_s / 60:.1f} min</div><div class="l">video length</div></div>

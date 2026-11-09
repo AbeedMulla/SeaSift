@@ -1,4 +1,4 @@
-"""Make a fake murky underwater video with fish at known times, so you can test SeaSift
+"""Make a fake murky underwater video with fish at known times, so you can test seaSEArch
 before you have real footage. It also writes the "answer key" (ground truth).
 
 Usage:  python tools/make_test_video.py

@@ -1,4 +1,4 @@
-# Keep SeaSift private to this laptop.
+# Keep seaSEArch private to this laptop.
 [server]
 address = "localhost"     # only this computer can open the app
 maxUploadSize = 4000      # MB. For bigger files, copy them into data/videos instead.

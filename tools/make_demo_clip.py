@@ -1,4 +1,4 @@
-"""Make a side-by-side clip for the pitch: the original on the left, SeaSift's enhanced version
+"""Make a side-by-side clip for the pitch: the original on the left, seaSEArch's enhanced version
 on the right, with orange boxes where it saw movement and the footage-quality score.
 
     python tools/make_demo_clip.py data/videos/v06.mp4 --start 5 --end 20
@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from seasift import clips, config  # noqa: E402
-from seasift.video import video_info  # noqa: E402
+from seasearch import clips, config  # noqa: E402
+from seasearch.video import video_info  # noqa: E402
 
 
 def main():

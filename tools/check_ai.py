@@ -14,10 +14,10 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from seasift import config  # noqa: E402
-from seasift.ai import FishDetector, SpeciesSuggester, ai_status, pick_device  # noqa: E402
-from seasift.species import load_species_list  # noqa: E402
-from seasift.video import FrameReader  # noqa: E402
+from seasearch import config  # noqa: E402
+from seasearch.ai import FishDetector, SpeciesSuggester, ai_status, pick_device  # noqa: E402
+from seasearch.species import load_species_list  # noqa: E402
+from seasearch.video import FrameReader  # noqa: E402
 
 
 def load_test_frame(path):
@@ -69,6 +69,7 @@ def main():
         top = suggester.suggest(crop_path)
     per_crop = (time.time() - t) / 3
     print(f"BioCLIP: {per_crop:.2f} s per fish crop. Top guesses: {top}")
+    print("What kind of thing is in the crop:", suggester.kind(crop_path))
     print(f"\nWrite these down for the pitch: detector {per_frame:.2f} s/frame, "
           f"species {per_crop:.2f} s/crop on {pick_device()}.")
 

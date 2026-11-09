@@ -11,16 +11,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SMOKE_OUT = ROOT / "data" / "_smoke"
 shutil.rmtree(SMOKE_OUT, ignore_errors=True)
-os.environ["SEASIFT_OUT"] = str(SMOKE_OUT)  # must happen before importing seasift
+os.environ["SEASEARCH_OUT"] = str(SMOKE_OUT)  # must happen before importing seasearch
 sys.path.insert(0, str(ROOT))
 
 import cv2  # noqa: E402
 
-from seasift import cards, clips, config, counting, db, difficulty, protocol, sightings, species  # noqa: E402
-from seasift import ai as ai_module  # noqa: E402
-from seasift.pipeline import camera_handling, process_video, review_moments, unprocessed_videos  # noqa: E402
-from seasift.video import cached_frame  # noqa: E402
-from seasift.report import build_report_html  # noqa: E402
+from seasearch import cards, clips, config, counting, db, difficulty, protocol, sightings, species  # noqa: E402
+from seasearch import ai as ai_module  # noqa: E402
+from seasearch.pipeline import camera_handling, find_scenery, process_video, review_moments, unprocessed_videos  # noqa: E402
+from seasearch.video import cached_frame  # noqa: E402
+from seasearch.report import build_report_html  # noqa: E402
 
 VIDEO = ROOT / "data" / "videos" / "test_murky.mp4"
 results = []
@@ -33,18 +33,30 @@ def check(name, ok, detail=""):
 
 
 class FakeDetector:
+    """Two fake fish that swim to a new spot every frame (boxes stuck in one spot count as scenery)."""
+    calls = 0
+
     def __init__(self, *args, **kwargs):
         pass
 
     def detect(self, frame):
-        return [(100.0, 100.0, 180.0, 140.0, 0.9), (300.0, 150.0, 380.0, 190.0, 0.8)]
+        FakeDetector.calls += 1
+        x, y = 20.0 + (FakeDetector.calls * 97) % 440, 20.0 + (FakeDetector.calls * 61) % 260
+        return [(x, y, x + 80, y + 40, 0.9), (x + 100, y + 20, x + 180, y + 60, 0.8)]
 
 
 class FakeSuggester:
-    def __init__(self, species_df, *args, **kwargs):
-        pass
+    answer = "fish"  # what kind() says: set to "crab" to test finding crabs from movement
 
-    def suggest(self, image_path, k=3):
+    def __init__(self, species_df, *args, **kwargs):
+        self.crabs = list(species_df[species_df.group == "invertebrate"].scientific_name)
+
+    def kind(self, image_path):
+        return FakeSuggester.answer, 0.9
+
+    def suggest(self, image_path, k=3, group="all"):
+        if group == "invertebrate":
+            return [(self.crabs[0], 0.7), (self.crabs[1], 0.2), (self.crabs[2], 0.05)]
         return [("Tautogolabrus adspersus", 0.8), ("Gadus morhua", 0.1), ("Chaetodon ocellatus", 0.05)]
 
 
@@ -289,6 +301,9 @@ def main():
           [p.resolve() for p in unprocessed_videos(conn)])
 
     # AI tier with fake models (tests the wiring, not the models)
+    still = [{"event_id": e, "x1": 10, "y1": 10, "x2": 60, "y2": 30} for e in (1, 2)]
+    swim = [{"event_id": e, "x1": 100 + 90 * e, "y1": 50, "x2": 150 + 90 * e, "y2": 70} for e in (1, 2)]
+    check("AI boxes stuck in one spot across moments are hidden as scenery", find_scenery(still + swim) == {0, 1})
     ai_module.FishDetector, ai_module.SpeciesSuggester = FakeDetector, FakeSuggester
     vid2, s2 = process_video(VIDEO, site="coastal_eelgrass_example", use_ai=True, conn=conn)
     dets = db.query(conn, "SELECT * FROM detections WHERE video_id = ?", (vid2,))
@@ -296,6 +311,19 @@ def main():
           f"{len(dets)} detections, flags {sorted(set(dets.flag))}")
     suggested = counting.suggested_counts(dets)
     check("suggested counts per event", max(suggested.values()) == 2, f"{suggested}")
+    check("AI only asks about movement for crabs and shrimp (a 'fish' answer is the detector's job)",
+          set(dets.source) == {"detector"})
+
+    # Crabs and shrimp: the fish detector never boxes them, BioCLIP looks at what moved
+    FakeSuggester.answer = "crab"
+    vid_c, _ = process_video(VIDEO, site="coastal_eelgrass_example", use_ai=True, conn=conn)
+    FakeSuggester.answer = "fish"
+    dc = db.query(conn, "SELECT * FROM detections WHERE video_id = ?", (vid_c,))
+    site = species.load_species_list(species.site_csv("coastal_eelgrass_example"))
+    inverts = set(site[site.group == "invertebrate"].scientific_name)
+    moved = dc[dc.source == "movement"]
+    check("crabs found from movement, named from the site's invertebrates",
+          len(moved) > 0 and set(moved.species_1) <= inverts, f"{len(moved)} from movement")
 
     # Detector only (species suggestions switched off): boxes and counts, people pick species
     config.SPECIES_SUGGESTIONS = False
@@ -349,44 +377,79 @@ def app_flow(ai_video):
     import datetime
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180).run()
     check("app: process page opens", *ok(app))
+    app.selectbox[0].set_value(VIDEO).run()  # the test clip, even when a big survey video sorts first
     app.date_input[0].set_value(datetime.date(2026, 8, 14)).run()
     click(app, "Process video")
     newest = db.query(db.connect(), "SELECT survey_date FROM videos ORDER BY id DESC LIMIT 1").survey_date.iloc[0]
     check("app: process a video, with its survey date", not app.exception and len(app.success) > 0
           and newest == "2026-08-14", newest)
 
-    app.sidebar.radio[0].set_value("2 · Review moments").run()
+    click(app, "Review this video now")
+    check("app: 'Review this video now' opens the review page on that video",
+          not app.exception and app.sidebar.radio[0].value == "2 · Review moments"
+          and app.selectbox[0].value == int(db.query(db.connect(), "SELECT MAX(id) AS id FROM videos").id.iloc[0]))
     check("app: review page opens", *ok(app))
     box = [s for s in app.selectbox if s.key and s.key.startswith("species_")][0]
     check("app: the species box starts empty (no species saved by accident)", box.value is None, str(box.value))
     crabs = species.names_in_group(species.load_species_list(species.site_csv("coastal_eelgrass_example")),
                                    "invertebrate")
-    what = [r for r in app.radio if r.label == "What is it?"][0]
-    what.set_value("invertebrate").run()
-    crab_cards = len([b for b in app.button if b.label == "This one"])
+
+    def pills(label):
+        return [p for p in app.button_group if p.label == label]
+
+    def card_buttons():
+        return [b for b in app.button if b.key and b.key.startswith("card_")]
+
+    pills("What is it?")[0].set_value("invertebrate").run()
+    crab_cards = len(card_buttons())
     check("app: 'What is it?' shows the invertebrate cards and hides the fish questions",
-          not app.exception and crab_cards == min(6, len(crabs)) and not [r for r in app.radio if r.label == "Body"]
+          not app.exception and crab_cards == min(6, len(crabs)) and not pills("Body")
           and any(t.label.startswith("Show") for t in app.toggle) == (len(crabs) > 6), f"{crab_cards} cards")
-    [r for r in app.radio if r.label == "What is it?"][0].set_value(cards.CANT_SEE).run()
+    check("app: the first cards can be picked with number keys",
+          [b.proto.shortcut for b in card_buttons()[:3]] == ["1", "2", "3"]
+          and card_buttons()[0].label == "This one", str([b.label for b in card_buttons()[:3]]))
+    pills("What is it?")[0].set_value(None).run()
+
     def matching():  # from the caption "N of M species on this site's list match."
         text = [c.value for c in app.caption if "species on this site's list match" in c.value][0]
         return int(text.split(" of ")[0])
 
+    def moment():  # "Moment 1 of 4 · 0:08 to 0:12 ..."
+        return [m.value for m in app.markdown if m.value.startswith("**Moment ")][0].split(" · ")[1]
+
     before = matching()
-    [r for r in app.radio if r.label == "Body"][0].set_value("long and thin").run()
+    pills("Body")[0].set_value("long and thin").run()
     after = matching()
     check("app: question helper narrows the species cards", 0 < after < before, f"{before} -> {after} cards")
-    [b for b in app.button if b.key and b.key.endswith("_Anguilla rostrata")][0].click().run()
-    picked = [s for s in app.selectbox if s.key and s.key.startswith("species_")][0].value
-    check("app: clicking a card fills in the species", picked == "Anguilla rostrata", str(picked))
-    card = [b for b in app.button if b.key and b.key.endswith("_Anguilla rostrata")][0]
-    check("app: the clicked card says it's selected", card.label == "Selected", card.label)
+    first_moment = moment()
     app.number_input[0].set_value(2)
-    click(app, "Save this species")
-    saved = db.query(db.connect(), "SELECT species, traits, photo_path FROM labels ORDER BY id DESC LIMIT 1")
-    check("app: save a species, with what the reviewer saw and a picture",
-          any("Saved" in m.value for m in app.markdown) and saved.species.iloc[0] == "Anguilla rostrata"
+    [b for b in app.button if b.key and b.key.endswith("_Anguilla rostrata")][0].click().run()
+    saved = db.query(db.connect(), "SELECT species, count, traits, photo_path, event_id FROM labels "
+                                   "ORDER BY id DESC LIMIT 1")
+    status = db.query(db.connect(), "SELECT status FROM events WHERE id = ?",
+                      (int(saved.event_id.iloc[0]),)).status.iloc[0]
+    check("app: one click on a card saves the species, with what the reviewer saw and a picture",
+          not app.exception and saved.species.iloc[0] == "Anguilla rostrata" and saved["count"].iloc[0] == 2
           and saved.traits.iloc[0] == "body: long and thin" and isinstance(saved.photo_path.iloc[0], str))
+    check("app: ...and moves on to the next moment", status == "reviewed" and moment() != first_moment
+          and any("Saved American eel x2" in m.value for m in app.markdown), f"{first_moment} -> {moment()}")
+    click(app, "Undo")
+    gone = db.query(db.connect(), "SELECT COUNT(*) AS n FROM labels WHERE event_id = ?",
+                    (int(saved.event_id.iloc[0]),)).n.iloc[0]
+    check("app: Undo takes the save back and returns to that moment", not app.exception and gone == 0
+          and moment() == first_moment, f"back at {moment()}")
+    def save_eel():  # answers are per moment, so narrow the cards down again first
+        pills("Body")[0].set_value("long and thin").run()
+        [b for b in app.button if b.key and b.key.endswith("_Anguilla rostrata")][0].click().run()
+
+    app.number_input[0].set_value(2)
+    save_eel()
+    [t for t in app.toggle if t.label == "Next moment after saving"][0].set_value(False).run()
+    second_moment = moment()
+    save_eel()
+    check("app: with 'Next moment after saving' off, a save stays on the moment",
+          moment() == second_moment and any("Saved: American eel x1" in m.value for m in app.markdown)
+          and [b for b in app.button if b.key and b.key.endswith("_Anguilla rostrata")][0].disabled)
     app.text_input[0].set_value("Mystery fish 2")  # "Mystery fish" was already seen at this site above
     click(app, "Save this species")
     check("app: first sighting alert for a species new to this site",
@@ -394,6 +457,7 @@ def app_flow(ai_video):
     click(app, "Not now")
     check("app: alert can be dismissed", not any("First sighting at this site" in m.value for m in app.markdown))
     click(app, "Done")
+    check("app: Done moves on to the next moment", moment() != second_moment)
     click(app, "Nothing here")
     check("app: finish and dismiss events", *ok(app))
 

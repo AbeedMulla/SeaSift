@@ -33,8 +33,9 @@ FLAG_TEXT = {
     "unexpected": "Unexpected or watch-list species: get an expert to check",
     "unidentifiable": "Too murky to identify",
     "unsure": "AI is unsure",
-    "false_alarm": "Probably not a fish (plant or seaweed)",
+    "false_alarm": "Probably not an animal (seaweed, sand, rope...), hidden",
     "fish": "Fish found (the reviewer picks the species)",
+    "scenery": "Not a fish: in the same spot in several moments (pole, rock), hidden",
 }
 
 

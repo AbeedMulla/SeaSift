@@ -13,9 +13,10 @@ VIDEO_DIR = DATA_DIR / "videos"          # put survey videos here
 SPECIES_DIR = DATA_DIR / "species_lists" # one CSV per survey site
 MODEL_DIR = ROOT / "models"              # AI model weights (AI tier only)
 # Results: the database, event pictures and fish crops. The smoke test points this
-# somewhere else (SEASIFT_OUT) so it never touches your real results.
-OUT_DIR = Path(os.environ.get("SEASIFT_OUT", DATA_DIR))
-DB_PATH = OUT_DIR / "seasift.db"
+# somewhere else (SEASEARCH_OUT) so it never touches your real results.
+OUT_DIR = Path(os.environ.get("SEASEARCH_OUT", DATA_DIR))
+DB_PATH = OUT_DIR / "seasearch.db"
+OLD_DB_PATH = OUT_DIR / "seasift.db"  # from before the app was renamed: picked up automatically
 THUMB_DIR = OUT_DIR / "thumbs"   # review pictures, saved once so the Review page never waits for the video
 COUNT_FRAME_DIR = OUT_DIR / "count_frames"  # the frames people count on (Count frames page)
 CROP_DIR = OUT_DIR / "crops"
@@ -122,11 +123,20 @@ QC_MAX_DIFF_PCT = 6.0    # the two counts should differ by less than this percen
 
 # ---------------------------------------------------------------- AI tier (optional)
 DETECTOR_WEIGHTS = MODEL_DIR / "cfd-yolov12x-1.00.pt"  # Community Fish Detector weights
+AI_DEVICE = os.environ.get("SEASEARCH_AI_DEVICE", "")  # "" = pick automatically: cuda, then mps (macOS 15+
+                        # only, it crashes on older macOS), then cpu. Or force one, e.g. SEASEARCH_AI_DEVICE=cpu
 DETECT_IMGSZ = 640      # smaller = faster on a laptop (the model was trained at 1024)
 DETECT_CONF = 0.25      # ignore fish boxes below this confidence
+SCENERY_IOU = 0.5       # two AI boxes overlapping this much (0-1) are in the same spot
+SCENERY_MOMENTS = 2     # an AI "fish" in the same spot in this many different moments is scenery
+                        # (bands on a measuring pole, a rock): real fish move. Those boxes are hidden.
 DETECT_FPS = 0.5        # inside an event, check one frame every 2 seconds
 MAX_DETECT_FRAMES_PER_EVENT = 10
 SPECIES_SUGGESTIONS = True  # False = detector only: the AI draws fish boxes and counts them,
                             # a person picks every species. Use this if BioCLIP tests badly.
-USE_BIOCLIP_V1 = True   # True = original BioCLIP (smaller, faster). False = BioCLIP 2.
+USE_BIOCLIP_V1 = False  # False = BioCLIP 2 (better: on real Coastal Action footage it named all 8 crabs and
+                        # shrimp right, BioCLIP 1 got 0-2; about 0.4 s per crop on a laptop CPU).
+                        # True = the original BioCLIP (smaller, about 0.1 s per crop)
+LOOK_AT_MOVEMENT = True # also ask BioCLIP about what moved in each moment: finds crabs and shrimp,
+                        # which the fish detector never boxes
 SPECIES_MIN_SCORE = 0.35  # species guesses below this score are marked "unsure"

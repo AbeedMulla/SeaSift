@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS detections (
     species_1 TEXT, score_1 REAL,
     species_2 TEXT, score_2 REAL,
     species_3 TEXT, score_3 REAL,
-    flag      TEXT         -- known / unexpected / unidentifiable / unsure / false_alarm
+    flag      TEXT,        -- known / unexpected / unidentifiable / unsure / false_alarm / scenery
+    source    TEXT         -- detector (fish detector box) / movement (what moved: crabs, shrimp)
 );
 
 -- What a person confirmed. count = the most of that species seen at the same time.
@@ -112,6 +113,8 @@ def now():
 def connect(path=None):
     """Open the database (and create the tables the first time)."""
     path = Path(path or config.DB_PATH)
+    if path == config.DB_PATH and not path.exists() and config.OLD_DB_PATH.exists():
+        config.OLD_DB_PATH.rename(path)  # results saved under the app's old name (SeaSift)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.executescript(SCHEMA)
@@ -122,6 +125,7 @@ def connect(path=None):
     add_missing_column(conn, "labels", "traits", "TEXT")
     add_missing_column(conn, "labels", "photo_path", "TEXT")
     add_missing_column(conn, "videos", "juveniles", "INTEGER")
+    add_missing_column(conn, "detections", "source", "TEXT")
     return conn
 
 
@@ -176,10 +180,10 @@ def add_events(conn, video_id, events):
 
 def add_detections(conn, rows):
     cols = ["event_id", "video_id", "frame_s", "x1", "y1", "x2", "y2", "det_conf", "crop_path",
-            "species_1", "score_1", "species_2", "score_2", "species_3", "score_3", "flag"]
+            "species_1", "score_1", "species_2", "score_2", "species_3", "score_3", "flag", "source"]
     conn.executemany(
         f"INSERT INTO detections ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-        [tuple(r[c] for c in cols) for r in rows],
+        [tuple(r.get(c, "detector" if c == "source" else None) for c in cols) for r in rows],
     )
     conn.commit()
 
@@ -202,6 +206,11 @@ def set_label_photo(conn, label_id, photo_path):
 
 def delete_label(conn, label_id):
     conn.execute("DELETE FROM labels WHERE id = ?", (label_id,))
+    conn.commit()
+
+
+def set_detection_flag(conn, detection_ids, flag):
+    conn.executemany("UPDATE detections SET flag = ? WHERE id = ?", [(flag, int(i)) for i in detection_ids])
     conn.commit()
 
 

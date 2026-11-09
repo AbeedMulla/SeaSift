@@ -16,9 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from seasift.pipeline import scan_video  # noqa: E402
-from seasift.triage import build_events  # noqa: E402
-from seasift.visibility import label_for  # noqa: E402
+from seasearch.pipeline import scan_video  # noqa: E402
+from seasearch.triage import build_events  # noqa: E402
+from seasearch.visibility import label_for  # noqa: E402
 
 
 def truth_from_csv(path):

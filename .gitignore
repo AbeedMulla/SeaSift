@@ -5,6 +5,7 @@ __pycache__/
 venv/
 
 # Results (made by the app) and big files
+data/seasearch.db
 data/seasift.db
 data/thumbs/
 data/crops/

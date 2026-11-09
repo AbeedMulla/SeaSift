@@ -1,4 +1,4 @@
-"""SeaSift: sift hours of murky survey video down to minutes of review.
+"""seaSEArch: sift hours of murky survey video down to minutes of review.
 
 Tier 0 (classical computer vision, no trained model): motion triage, visibility score,
 enhancement, review, MaxN.
