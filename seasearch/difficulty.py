@@ -1,4 +1,4 @@
-"""Easy or hard? Who should review a moment, from things SeaSift already measured. No AI.
+"""Easy or hard? Who should review a moment, from things seaSEArch already measured. No AI.
 
 Needs an expert when the water is murky, many things move at once (hard to count),
 or the fish look tiny (too far away to identify). Otherwise a trained volunteer could do it,

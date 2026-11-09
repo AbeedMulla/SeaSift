@@ -1,4 +1,4 @@
-"""SeaSift app. Start it with:   streamlit run app.py
+"""seaSEArch app. Start it with:   streamlit run app.py
 
 Pages:
   1 · Process a video   -> triage + footage quality (+ optional local AI); saves every review picture
@@ -23,17 +23,19 @@ import streamlit as st
 
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-from seasift import cards, clips, config, counting, db, difficulty, protocol, sightings, species
-from seasift.ai import ai_status
-from seasift.energy import describe_kwh
-from seasift.enhance import enhance
-from seasift.pipeline import (mark_camera_handling, process_video, recorded_date, review_moments,
+from seasearch import cards, clips, config, counting, db, difficulty, protocol, sightings, species
+from seasearch.ai import ai_status
+from seasearch.energy import describe_kwh
+from seasearch.enhance import enhance
+from seasearch.pipeline import (mark_camera_handling, mark_scenery, process_video, recorded_date, review_moments,
                               thumb_folder, unprocessed_videos)
-from seasift.report import build_report_html
-from seasift.video import FrameReader, cached_frame
-from seasift.visibility import minutes_by_label
+from seasearch.report import build_report_html
+from seasearch.video import FrameReader, cached_frame
+from seasearch.visibility import minutes_by_label
 
-st.set_page_config(page_title="SeaSift", page_icon="🐟", layout="wide")
+st.set_page_config(page_title="seaSEArch", page_icon="🐟", layout="wide")
+# Less empty space above each page, so more of the work fits on one screen
+st.markdown("<style>[data-testid='stMainBlockContainer'] {padding-top: 2.5rem;}</style>", unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -279,14 +281,76 @@ def clarity_chart(segments, frame_times=(), current=None, height=230):
     return alt.layer(*layers).properties(height=height).configure_view(stroke=None)
 
 
+PAGES = ["1 · Process a video", "2 · Review moments", "3 · Report", "4 · Sightings",
+         "5 · Count frames (MeanCount)", "Species lists"]
+
+
+def go_to(page_name, video_id=None):
+    """For the 'next step' buttons (as on_click, so it runs before the sidebar is drawn)."""
+    st.session_state["page"] = page_name
+    if video_id is not None:
+        st.session_state["current_video"] = int(video_id)
+
+
 def pick_video(key):
+    """Pick a processed video. Every page opens on the video you used last, so you only pick it once."""
     videos = db.query(conn, "SELECT * FROM videos ORDER BY id DESC")
     if videos.empty:
         st.info("No processed videos yet. Start on page 1.")
         st.stop()
     names = {int(r.id): f"#{r.id} · {r.filename} · {r.site or 'no site list'}" for r in videos.itertuples()}
-    vid = st.selectbox("Video", list(names), format_func=names.get, key=key)
+    ids = list(names)
+    current = st.session_state.get("current_video")
+    vid = st.selectbox("Video", ids, index=ids.index(current) if current in ids else 0,
+                       format_func=names.get, key=key)
+    st.session_state["current_video"] = vid
     return videos[videos.id == vid].iloc[0]
+
+
+def save_species(ev, video, site_df, name, count, proof, note="", finish=False):
+    """Save one species for a moment, with what the reviewer saw and a proof picture.
+    finish: the moment is done too (the reviewer moves on to the next one)."""
+    vid, event_id = int(video.id), int(ev.id)
+    seen_now = {f: st.session_state.get(f"q_{f}_{event_id}") for f in ["what", *cards.QUESTIONS]}
+    label_id = db.save_label(conn, event_id, vid, name, count, note, proof_s=proof,
+                             traits=cards.describe(seen_now) or None)
+    frame = review_picture(vid, str(video.path), proof, bool(ev.visibility < config.CLEAR_SCORE))
+    if frame is not None:  # a small picture for the species cards
+        db.set_label_photo(conn, label_id, cards.save_label_photo(frame, label_id))
+    if (video.site and sightings.needs_alert(site_df, name)
+            and sightings.is_first_sighting(conn, video.site, name, label_id)):
+        st.session_state["new_arrival"] = {
+            "label_id": label_id, "species": name, "site": video.site, "video_id": vid,
+            "filename": video.filename, "time_s": float(proof), "survey_date": sightings.survey_day(video)}
+    if finish:
+        db.set_event_status(conn, event_id, "reviewed")
+    common = species.common_name(site_df, name)
+    st.session_state["last_saved"] = {"label_id": label_id, "event_id": event_id, "video_id": vid,
+                                      "finished": finish, "text": f"{common} x{count} at {fmt_time(ev.start_s)}"}
+    st.toast(f"Saved {common} x{count}" + (". Next moment" if finish else ""))
+
+
+def undo_last_save():
+    """Take back the last save, and go back to that moment if it moved you on."""
+    last = st.session_state.pop("last_saved", None)
+    if not last:
+        return
+    db.delete_label(conn, last["label_id"])
+    if last["finished"]:
+        db.set_event_status(conn, last["event_id"], "pending")
+    st.session_state["jump_to_event"] = last["event_id"]
+    if (st.session_state.get("new_arrival") or {}).get("label_id") == last["label_id"]:
+        del st.session_state["new_arrival"]
+
+
+def undo_line(video_id):
+    """'Saved Cunner x2 at 0:42 [Undo]', after the last save."""
+    last = st.session_state.get("last_saved")
+    if not last or last["video_id"] != video_id:
+        return
+    row = st.columns([4, 1], vertical_alignment="center")
+    row[0].markdown(f":green[:material/check_circle: Saved {last['text']}]")
+    row[1].button("Undo", key="undo_save", on_click=undo_last_save, icon=":material/undo:", width="stretch")
 
 
 def video_files():
@@ -303,43 +367,50 @@ def upload_box():
         st.success(f"Saved {up.name} to data/videos")
 
 
-def pick_species(event_id, name):
-    """A species card was clicked: put it in the form's species box (redraws the whole page)."""
-    st.session_state[f"species_{event_id}"] = name
-    st.session_state[f"other_{event_id}"] = ""
-    st.rerun()
+@st.cache_data(show_spinner=False, max_entries=200)
+def card_picture(path):
+    """A species photo cut to the same shape as the drawn outlines (16:9), so the cards line up."""
+    img = cv2.imread(str(path))
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if w / h > 16 / 9:
+        cut = int((w - h * 16 / 9) / 2)
+        img = img[:, cut:w - cut]
+    else:
+        cut = int((h - w * 9 / 16) / 2)
+        img = img[cut:h - cut]
+    return cv2.resize(img, (320, 180), interpolation=cv2.INTER_AREA)
 
 
-def species_cards(names, rows, site_df, seen, ai_scores, photos, event_id):
-    """Draw species cards, three per row. Clicking "This one" fills in the species."""
+def species_cards(names, rows, seen, ai_scores, photos, event_id, saved_names, on_pick, first_number=1):
+    """Species cards, three per row. One click on a card saves that species (or press its number)."""
     for start in range(0, len(names), 3):
         cols = st.columns(3)
-        for col, name in zip(cols, names[start:start + 3]):
-            row = rows[name]
+        for i, (col, name) in enumerate(zip(cols, names[start:start + 3])):
+            number, row = first_number + start + i, rows[name]
             with col.container(border=True):
                 path, credit = cards.card_photo(row, photos)
-                if path is not None:
-                    st.image(str(path), width="stretch", caption=credit or None)
-                else:
-                    st.image(cards.outline(row.get("body", ""), species.group_of(row)), channels="BGR",
-                             width="stretch")
-                tag = species.badge(species.row_category(row))
-                st.markdown(f"**{row['common_name']}**  \n*{name}*  \n{tag}")
-                looks = cards.describe_features(row)
-                lines = [row["tip"]] if row.get("tip") else []
-                lines += [f"Looks: {looks}"] if looks else []
-                times = seen.get(name, 0)
-                lines += [f"Seen here {times} time{'' if times == 1 else 's'}"]
+                picture = card_picture(path) if path is not None else None
+                if picture is None:
+                    picture, credit = cards.outline(row.get("body", ""), species.group_of(row)), None
+                own = name in photos  # a picture from your own footage needs no credit line
+                st.image(picture, channels="BGR", width="stretch", caption=None if own else credit or None)
+                st.markdown(f"**{row['common_name']}** {species.badge(species.row_category(row))}")
+                facts = [f"*{name}*", f"seen here {seen.get(name, 0)}x" + (", your photo" if own else "")]
                 if name in ai_scores:
-                    lines.append(f"AI match {ai_scores[name]:.0%}")
-                st.caption("  \n".join(lines))
-                # The species box can be off screen by now, so show the result right on the card.
-                selected = st.session_state.get(f"species_{event_id}") == name
-                st.button("Selected" if selected else "This one", key=f"card_{event_id}_{name}",
-                          on_click=pick_species, args=(event_id, name), width="stretch",
-                          type="primary" if selected else "secondary")
-                if selected:
-                    st.caption(":green[Added to the species box. Scroll up and click **Save this species**.]")
+                    facts.append(f"AI match {ai_scores[name]:.0%}")
+                st.caption(" · ".join(facts))
+                looks = cards.describe_features(row)
+                tip = "  \n".join(x for x in [row.get("tip") or "", f"Looks: {looks}" if looks else ""] if x)
+                saved = name in saved_names
+                has_key = number <= 9 and not saved
+                if st.button("Saved" if saved else "This one",  # Streamlit shows the number key on it
+                             key=f"card_{event_id}_{name}", width="stretch", disabled=saved,
+                             icon=":material/check:" if saved else None, help=tip or None,
+                             shortcut=str(number) if has_key else None):
+                    on_pick(name)
+                    st.rerun()  # the whole page: the next moment, or this one with the species saved
 
 
 def show_new_arrival(arrival, site_df):
@@ -388,21 +459,18 @@ def show_new_arrival(arrival, site_df):
 
 
 @st.fragment
-def help_me_identify(event_id, site, site_df, dets):
-    """Quick questions narrow down the species cards. No AI. Answering only redraws this part."""
-    st.markdown("#### Help me identify")
-    st.caption("Answer only what you can see. Each answer hides the species that don't match. "
-               "Then click the right card. Know it already? Just click its card.")
-    st.caption(":orange[Sample data:] the species descriptions and tips are our drafts for this prototype, "
-               "not checked by a biologist. Edit them on the Species lists page.")
-    what = st.radio("What is it?", [cards.CANT_SEE] + list(cards.WHAT), horizontal=True,
-                    format_func=lambda w: cards.WHAT.get(w, w), key=f"q_what_{event_id}")
+def help_me_identify(event_id, site, site_df, dets, saved_names, on_pick):
+    """Quick questions narrow down the species cards (no AI); one click on a card saves it.
+    Answering a question only redraws this part of the page."""
+    what = st.pills("What is it?", list(cards.WHAT), format_func=cards.WHAT.get, key=f"q_what_{event_id}",
+                    help="Answer only what you can see: each answer hides the species that don't match. "
+                         "Can't tell? Leave it blank.")
     answers = {"what": what}
     if what != "invertebrate":  # the shape questions are about fish
-        question_cols = st.columns(3)
-        answers |= {feature: question_cols[i].radio(feature.capitalize(), [cards.CANT_SEE] + choices,
-                                                    key=f"q_{feature}_{event_id}")
-                    for i, (feature, choices) in enumerate(cards.QUESTIONS.items())}
+        answered = any(st.session_state.get(f"q_{f}_{event_id}") for f in cards.QUESTIONS)
+        with st.expander("Not sure which fish? Narrow it down by shape", expanded=answered):
+            answers |= {feature: st.pills(feature.capitalize(), choices, key=f"q_{feature}_{event_id}")
+                        for feature, choices in cards.QUESTIONS.items()}
     listed = site_df[site_df.status != "not_fish"]
     shown = cards.filter_species(listed, answers)
     ai_scores = cards.ai_scores_for_event(dets) if not dets.empty else {}
@@ -410,10 +478,14 @@ def help_me_identify(event_id, site, site_df, dets):
     photos = cards.own_photos(conn)
     order = cards.card_order(shown, seen, ai_scores)
     rows = {r["scientific_name"]: r for r in shown.to_dict("records")}
-    st.caption(f"{len(order)} of {len(listed)} species on this site's list match.")
-    species_cards(order[:6], rows, site_df, seen, ai_scores, photos, event_id)
+    st.caption(f"{len(order)} of {len(listed)} species on this site's list match · click a card or press "
+               "its number to save · :orange[sample data]",
+               help="The species descriptions and tips are our drafts for this prototype, not checked by "
+                    "a biologist. Edit them on the Species lists page. Hover over a card's button for its tip.")
+    species_cards(order[:6], rows, seen, ai_scores, photos, event_id, saved_names, on_pick)
     if len(order) > 6 and st.toggle(f"Show {len(order) - 6} more", key=f"more_cards_{event_id}"):
-        species_cards(order[6:], rows, site_df, seen, ai_scores, photos, event_id)  # only drawn when asked
+        species_cards(order[6:], rows, seen, ai_scores, photos, event_id, saved_names, on_pick,
+                      first_number=7)  # only drawn when asked
 
 
 @st.fragment
@@ -453,7 +525,7 @@ def counting_area(video, subs, site_df, qc_mode):
                           (vid, float(s.time_s) + config.CONTEXT_S, float(s.time_s) - config.CONTEXT_S))
         st.markdown(":orange-badge[Movement seen within 5 s]" if int(nearby.n.iloc[0]) else
                     ":gray-badge[No movement seen within 5 s]",
-                    help="From SeaSift's movement scan. Either way, check the bottom for camouflaged animals.")
+                    help="From seaSEArch's movement scan. Either way, check the bottom for camouflaged animals.")
         kind = st.radio("What are you dotting?", list(protocol.KINDS), format_func=protocol.KINDS.get,
                         key="dot_kind")
         group = "invertebrate" if kind == "invert" else "fish"
@@ -533,11 +605,10 @@ def counting_area(video, subs, site_df, qc_mode):
 
 
 # ---------------------------------------------------------------- sidebar
-st.sidebar.title("🐟 SeaSift")
+st.sidebar.title("🐟 seaSEArch")
 st.sidebar.caption("Hours of murky survey video, down to minutes of review. "
                    "Runs on this laptop: no internet, no trained AI model needed.")
-page = st.sidebar.radio("Page", ["1 · Process a video", "2 · Review moments", "3 · Report",
-                                 "4 · Sightings", "5 · Count frames (MeanCount)", "Species lists"])
+page = st.sidebar.radio("Page", PAGES, key="page")
 status = ai_status()
 if status["ready"]:
     st.sidebar.caption("Local AI: ready (switch it on per video)")
@@ -551,13 +622,9 @@ else:
 # ---------------------------------------------------------------- 1 · process
 if page.startswith("1"):
     st.title("Process a survey video")
-    steps = st.columns(3)
-    for col, (title, text) in zip(steps, [
-            ("1 · Find the movement", "Skips empty footage and camera handling, and rates how clear the water is."),
-            ("2 · People confirm", "Staff confirm each species, with enhanced pictures and species cards."),
-            ("3 · Count and report", "MaxN per moment, MeanCount on sampled frames, and a one-file report.")]):
-        with col.container(border=True):
-            st.markdown(f"**{title}**  \n{text}")
+    st.caption("**1 · Find the movement**: skips empty footage and camera handling, and rates how clear the "
+               "water is. → **2 · People confirm** each species. → **3 · Count and report**: MaxN, MeanCount "
+               "and a one-file report.")
     upload_box()
     files = video_files()
     if not files:
@@ -594,7 +661,11 @@ if page.startswith("1"):
                     results.append({"video": path.name, "#": None, "minutes": None, "moments": None,
                                     "skipped": f"failed: {e}", "usable min": None})
             bar.progress(1.0, text="All done")
-            st.success(f"Processed {len(waiting)} videos. Review them on page 2.")
+            st.success(f"Processed {len(waiting)} videos.")
+            first = next((r["#"] for r in results if r["#"] is not None), None)
+            if first is not None:
+                st.button("Start reviewing", type="primary", icon=":material/arrow_forward:",
+                          on_click=go_to, args=(PAGES[1], first), key="review_batch")
             st.dataframe(pd.DataFrame(results), hide_index=True)
 
     if st.button("Process video", type="primary"):
@@ -607,7 +678,10 @@ if page.startswith("1"):
             st.error(f"Processing failed: {e}")
             st.stop()
         v = s["visibility_min"]
-        st.success(f"Done. Video #{vid} is ready to review on page 2.")
+        st.session_state["current_video"] = vid
+        st.success(f"Done. Video #{vid} is ready to review.")
+        st.button("Review this video now", type="primary", icon=":material/arrow_forward:",
+                  on_click=go_to, args=(PAGES[1], vid), key="review_now")
         c = st.columns(4)
         c[0].metric("Video length", f"{s['duration_min']} min", border=True)
         c[1].metric("Moments to review", s["events"], f"{s['event_min']} min of video", delta_color="off",
@@ -623,71 +697,98 @@ if page.startswith("1"):
                         width="stretch")
         st.caption(f"Estimated energy used: {describe_kwh(s['energy_kwh'])}")
         if s["ai_used"]:
-            st.caption(f"AI found {s['detections']} fish boxes. Flags: {s['flags']}")
+            st.caption(f"AI found {s['detections']} boxes (fish, crabs, shrimp). " + "; ".join(
+                f"{species.FLAG_TEXT.get(k, k)}: {v}" for k, v in s["flags"].items()))
 
 
 # ---------------------------------------------------------------- 2 · review
 elif page.startswith("2"):
-    st.title("Review moments")
-    video = pick_video("review_video")
+    top = st.columns([4, 3, 3], vertical_alignment="bottom")
+    with top[0]:
+        video = pick_video("review_video")
     vid = int(video.id)
     if not st.session_state.get(f"camera_checked_{vid}"):  # for videos processed before this check existed
         mark_camera_handling(conn, vid, float(video.duration_s))
+        mark_scenery(conn, vid)
         st.session_state[f"camera_checked_{vid}"] = True
     events = db.query(conn, "SELECT * FROM events WHERE video_id = ? ORDER BY start_s", (vid,))
     if events.empty:
-        st.info("No moments in this video: SeaSift found no movement.")
+        st.info("No moments in this video: seaSEArch found no movement.")
         st.stop()
 
     camera = int((events.status == "camera").sum())
     to_review = events[events.status != "camera"]
     done = int((to_review.status != "pending").sum())
-    st.progress(done / max(1, len(to_review)), text=f"{done} of {len(to_review)} moments reviewed")
-    if camera:
-        st.caption(f"{camera} moments where the camera was being put in or taken out were skipped "
-                   "automatically, like the first and last minute in Coastal Action's protocol.")
-    only_pending = st.checkbox("Only show moments still to review", value=True,
-                               help="Untick to see every moment again, including camera handling.")
+    top[1].progress(done / max(1, len(to_review)), text=f"{done} of {len(to_review)} moments reviewed")
+    only_pending = top[2].checkbox(
+        "Only moments to review", value=True,
+        help="Untick to see every moment again" + (
+            f", including the {camera} where the camera was being put in or taken out (skipped "
+            "automatically, like the first and last minute in Coastal Action's protocol)" if camera else "") + ".")
     view = events[events.status == "pending"] if only_pending else events
     if view.empty:
-        st.success("All moments reviewed. See the Report page.")
+        undo_line(vid)
+        st.success("All moments reviewed.")
+        st.button("Open the report", type="primary", icon=":material/arrow_forward:",
+                  on_click=go_to, args=(PAGES[2],))
         st.stop()
 
     key = f"pos_{vid}_{only_pending}"
+    jump = st.session_state.pop("jump_to_event", None)  # after Undo: back to that moment
+    if jump in list(view.id):
+        st.session_state[key] = list(view.id).index(jump)
     pos = min(st.session_state.get(key, 0), len(view) - 1)
     ev = view.iloc[pos]
     site_df = load_site(video.site)
-    dets = db.query(conn, "SELECT * FROM detections WHERE event_id = ?", (int(ev.id),))
+    dets = db.query(conn, "SELECT * FROM detections WHERE event_id = ? "
+                    "AND IFNULL(flag, '') NOT IN ('scenery', 'false_alarm')",
+                    (int(ev.id),))  # hidden: scenery (pole, rock) and things that aren't animals
     moments = review_moments(ev.start_s, ev.end_s, ev.peak_s)  # the busiest moment, then 3 across the event
     path = str(video.path)
+    moved = clips.read_boxes(ev.boxes)
 
-    nav = st.columns([2, 2, 5])
-    if nav[0].button("Previous", disabled=pos == 0, shortcut="PageUp"):
+    def next_moment():
+        """After finishing a moment. With 'Only moments to review' on, it leaves the list by itself."""
+        if not only_pending:
+            st.session_state[key] = min(pos + 1, len(view) - 1)
+
+    # One line: where you are, and what this moment is like
+    quality = "clear" if ev.visibility >= config.CLEAR_SCORE else \
+        "murky" if ev.visibility >= config.MURKY_SCORE else "too murky to identify"
+    who, reasons = difficulty.who_should_review(float(ev.visibility), moved)
+    nav = st.container(horizontal=True, vertical_alignment="center")
+    if nav.button("Previous", disabled=pos == 0, shortcut="PageUp", icon=":material/arrow_back:"):
         st.session_state[key] = pos - 1
         st.rerun()
-    if nav[1].button("Next", disabled=pos >= len(view) - 1, shortcut="PageDown"):
+    if nav.button("Next", disabled=pos >= len(view) - 1, shortcut="PageDown", icon=":material/arrow_forward:"):
         st.session_state[key] = pos + 1
         st.rerun()
+    nav.markdown(f"**Moment {pos + 1} of {len(view)}** · {fmt_time(ev.start_s)} to {fmt_time(ev.end_s)}"
+                    f" · footage **{quality}** ({ev.visibility:.0f}/100) · {difficulty.badge(who, reasons)}")
 
     arrival = st.session_state.get("new_arrival")
     if arrival and arrival["video_id"] == vid:
         show_new_arrival(arrival, site_df)
 
-    left, right = st.columns([3, 2])
+    left, right = st.columns(2, gap="medium")
     with left:
-        switches = st.columns(2)
-        enhanced = switches[0].toggle("Enhance murky frames", value=bool(ev.visibility < config.CLEAR_SCORE),
-                                      key=f"enh_{ev.id}")
-        compare = switches[1].toggle("Side by side with the original", key="compare")
+        switches = st.container(horizontal=True, gap="small")
+        enhanced = switches.toggle("Enhance", value=bool(ev.visibility < config.CLEAR_SCORE),
+                                      key=f"enh_{ev.id}",
+                                      help="Clears up murky water. On by default for murky moments.")
+        compare = switches.toggle("Side by side", key="compare",
+                                     help="The original and the enhanced picture next to each other.")
+        playing = switches.toggle("Play video", key="play_clip",
+                                     help="This moment as a short clip, enhanced if Enhance is on. "
+                                          "Each clip is made once, then saved.")
         if ev.status == "camera":
             st.markdown(":gray-badge[Camera being put in or taken out: skipped automatically]")
 
-        # The busiest moment, with boxes: the AI's fish boxes if it ran, otherwise where SeaSift saw movement
+        # The busiest moment, with boxes: the AI's boxes if it ran, otherwise where seaSEArch saw movement
         at_peak = dets[(dets.frame_s - moments[0]).abs() < 0.05] if not dets.empty else dets
-        moved = clips.read_boxes(ev.boxes)
         caption = f"Busiest moment at {fmt_time(ev.peak_s)}" + (
-            ". Yellow boxes: the AI's fish boxes" if not at_peak.empty else
-            ". Orange boxes: where SeaSift saw movement (no AI)" if moved else "")
+            ". Yellow boxes: what the AI found" if not at_peak.empty else
+            ". Orange boxes: where seaSEArch saw movement (no AI)" if moved else "")
 
         def busiest_view(enhance_it):
             frame = review_picture(vid, path, moments[0], enhance_it)
@@ -697,21 +798,32 @@ elif page.startswith("2"):
                 return draw_boxes(frame, at_peak, scale=frame.shape[1] / full_width(path))
             return clips.draw_movement(frame, moved)
 
-        if compare:
-            pair = st.columns(2)
-            for col, (enh, title) in zip(pair, [(False, "Original"), (True, "Enhanced by SeaSift")]):
-                picture = busiest_view(enh)
-                if picture is not None:
-                    col.image(picture, channels="BGR", caption=title, width="stretch")
-            st.caption(caption)
-        else:
-            picture = busiest_view(enhanced)
-            if picture is None:
-                st.caption("(picture not available)")
+        clip = None
+        if playing:  # the clip takes the big picture's place, so nothing moves further down
+            clip = get_clip(event_clip_job(video, ev, enhanced),
+                            "Making the clip (a few seconds; longer for 4K video)...")
+            if clip:
+                play_clip(clip)
+                st.caption(("Enhanced clip. " if enhanced else "Original colours. ")
+                           + "Orange boxes: where seaSEArch saw movement.")
             else:
-                st.image(picture, channels="BGR", caption=caption, width="stretch")
-        who, reasons = difficulty.who_should_review(float(ev.visibility), moved)
-        st.markdown(difficulty.badge(who, reasons))
+                st.caption("This computer can't write video clips, so here's the picture.")
+            if pos + 1 < len(view):  # get the next moment's clip ready while you look at this one
+                clip_maker().request(*event_clip_job(video, view.iloc[pos + 1], enhanced))
+        if clip is None:
+            if compare:
+                pair = st.columns(2)
+                for col, (enh, title) in zip(pair, [(False, "Original"), (True, "Enhanced by seaSEArch")]):
+                    picture = busiest_view(enh)
+                    if picture is not None:
+                        col.image(picture, channels="BGR", caption=title, width="stretch")
+                st.caption(caption)
+            else:
+                picture = busiest_view(enhanced)
+                if picture is None:
+                    st.caption("(picture not available)")
+                else:
+                    st.image(picture, channels="BGR", caption=caption, width="stretch")
 
         cols = st.columns(3)
         for col, t in zip(cols, moments[1:]):
@@ -721,113 +833,100 @@ elif page.startswith("2"):
             else:
                 col.image(frame, channels="BGR", caption=fmt_time(t), width="stretch")
 
-        playing = st.toggle("Play this moment as video", key="play_clip",
-                            help="A short clip, enhanced if Enhance is on. Clips are saved, so each is made once.")
-        if playing:
-            clip = get_clip(event_clip_job(video, ev, enhanced),
-                            "Making the clip (a few seconds; longer for 4K video)...")
-            if clip:
-                play_clip(clip)
-                st.caption(("Enhanced clip. " if enhanced else "Original colours. ")
-                           + "Orange boxes: where SeaSift saw movement.")
-            else:
-                st.caption("This computer can't write video clips. Use the pictures.")
-            if pos + 1 < len(view):  # get the next moment's clip ready while you look at this one
-                clip_maker().request(*event_clip_job(video, view.iloc[pos + 1], enhanced))
-
-        if site_df is not None:
-            help_me_identify(int(ev.id), video.site, site_df, dets)
-
     with right:
-        quality = "clear" if ev.visibility >= config.CLEAR_SCORE else \
-            "murky" if ev.visibility >= config.MURKY_SCORE else "too murky to identify"
-        st.subheader(f"Moment {pos + 1} of {len(view)}")
-        st.write(f"{fmt_time(ev.start_s)} to {fmt_time(ev.end_s)} · footage: **{quality}** "
-                 f"(score {ev.visibility:.0f}/100)")
+        undo_line(vid)
 
         suggestion, suggested_n = None, 1
         if not dets.empty:
-            st.markdown("**AI suggestions** (local, not checked yet)")
             counts = counting.suggested_counts(dets)
             summary = (dets.assign(species_1=dets.species_1.fillna(""))
                        .groupby(["species_1", "flag"])
                        .agg(boxes=("id", "count"), best_score=("score_1", "max"))
                        .reset_index().sort_values("boxes", ascending=False))
+            lines = []
             for r in summary.itertuples():
                 name = species.common_name(site_df, r.species_1) if r.species_1 else "Fish"
                 n = counts.get((int(ev.id), r.species_1), 1)
                 score = f", score {r.best_score:.2f}" if r.species_1 else ""
                 tag = species.badge(species.species_category(site_df, r.species_1)) if r.species_1 else ""
-                st.markdown(f"- {name} {tag}: up to {n} at once{score}. "
-                            f"{species.FLAG_TEXT.get(r.flag, r.flag)}")
-            top = summary.iloc[0].species_1
-            suggestion = top or None
-            suggested_n = counts.get((int(ev.id), top), 1)
+                lines.append(f"- {name} {tag}: up to {n} at once{score}. "
+                             f"{species.FLAG_TEXT.get(r.flag, r.flag)}")
+            st.markdown("**AI suggestions** (local, not checked yet)  \n" + "\n".join(lines))
+            top_species = summary.iloc[0].species_1
+            suggestion = top_species or None
+            suggested_n = counts.get((int(ev.id), top_species), 1)
             crops = [p for p in dets.crop_path.head(6) if p]
             if crops:
-                st.image([str(config.full_path(p)) for p in crops], width=90)
+                st.image([str(config.full_path(p)) for p in crops], width=56)
 
+        saved = db.query(conn, "SELECT * FROM labels WHERE event_id = ?", (int(ev.id),))
+        for r in saved.itertuples():
+            row = st.columns([4, 1], vertical_alignment="center")
+            tag = species.badge(species.species_category(site_df, r.species))
+            row[0].markdown(f"Saved: {species.common_name(site_df, r.species)} x{r.count} {tag}")
+            if row[1].button("Remove", key=f"del_{r.id}", width="stretch"):
+                db.delete_label(conn, int(r.id))
+                if (st.session_state.get("last_saved") or {}).get("label_id") == int(r.id):
+                    del st.session_state["last_saved"]
+                st.rerun()
+
+        count_key = f"count_{ev.id}"
+
+        def pick(name, proof=None, note=""):
+            """Save a species for this moment, and move on unless the reviewer turned that off."""
+            finish = st.session_state.get("auto_next", True)
+            save_species(ev, video, site_df, name, int(st.session_state.get(count_key) or suggested_n),
+                         moments[0] if proof is None else proof, note, finish)
+            if finish:
+                next_moment()
+
+        c = st.columns([1, 1.3], vertical_alignment="bottom")
+        c[0].number_input("How many at once?", min_value=1, value=int(suggested_n), key=count_key,
+                          help="The most of this species you can see at once in this moment (MaxN).")
+        c[1].toggle("Next moment after saving", value=st.session_state.get("auto_next_pref", True),
+                    key="auto_next",
+                    on_change=lambda: st.session_state.update(auto_next_pref=st.session_state["auto_next"]),
+                    help="Turn off for a moment with more than one species: save each one, then click Done.")
+
+        if site_df is not None:
+            help_me_identify(int(ev.id), video.site, site_df, dets, set(saved.species), pick)
+
+    with left:  # what to do with the whole moment, right under its pictures
+        b = st.container(horizontal=True)
+        if b.button("Nothing here", shortcut="Mod+Shift+X", icon=":material/block:",
+                    help="No animal in this moment (weed, sediment, light flicker...): go to the next one"):
+            db.set_event_status(conn, int(ev.id), "false_alarm")
+            next_moment()
+            st.rerun()
+        if b.button("Done", disabled=saved.empty, shortcut="Mod+Shift+Enter", icon=":material/done_all:",
+                    help="Every species in this moment is saved: go to the next one"):
+            db.set_event_status(conn, int(ev.id), "reviewed")
+            next_moment()
+            st.rerun()
         listed = site_df[site_df.status != "not_fish"] if site_df is not None else pd.DataFrame()
         options = list(listed.scientific_name) if not listed.empty else []
         proof_options = []  # busiest moment first, skipping repeats of the same second
         for t in moments:
             if fmt_time(t) not in [fmt_time(x) for x in proof_options]:
                 proof_options.append(t)
-        species_key = f"species_{ev.id}"
-        with st.form(f"label_{ev.id}", clear_on_submit=True):
-            label_name = lambda n: f"{species.common_name(site_df, n)} ({n})"  # noqa: E731
-            if species_key in st.session_state:  # a species card was clicked
-                choice = st.selectbox("Species", options, key=species_key, format_func=label_name,
-                                      placeholder="Pick a species, or click its card")
-            else:  # starts empty (or on the AI's suggestion), so nobody saves the wrong species by accident
-                choice = st.selectbox("Species", options, key=species_key, format_func=label_name,
+        with st.expander("Type the name instead, or add a note", expanded=site_df is None):
+            with st.form(f"label_{ev.id}", clear_on_submit=True, border=False):
+                label_name = lambda n: f"{species.common_name(site_df, n)} ({n})"  # noqa: E731
+                # starts empty (or on the AI's suggestion), so nobody saves the wrong species by accident
+                choice = st.selectbox("Species", options, key=f"species_{ev.id}", format_func=label_name,
                                       index=options.index(suggestion) if suggestion in options else None,
-                                      placeholder="Pick a species, or click its card")
-            other = st.text_input("Not on the list? Type it here instead", key=f"other_{ev.id}")
-            count = st.number_input("Most seen at the same time", min_value=1, value=int(suggested_n))
-            proof = st.radio("Which picture shows that many?", proof_options, horizontal=True,
-                             format_func=lambda t: ("busiest, " if t == moments[0] else "") + fmt_time(t))
-            note = st.text_input("Note (optional)")
-            if st.form_submit_button("Save this species", type="primary", shortcut="Mod+Enter"):
-                name = (other or "").strip() or choice
-                if not name:
-                    st.error("Pick a species or type one.")
-                else:
-                    seen_now = {f: st.session_state.get(f"q_{f}_{ev.id}") for f in ["what", *cards.QUESTIONS]}
-                    label_id = db.save_label(conn, int(ev.id), vid, name, count, note, proof_s=proof,
-                                             traits=cards.describe(seen_now) or None)
-                    frame = review_picture(vid, path, proof, bool(ev.visibility < config.CLEAR_SCORE))
-                    if frame is not None:  # a small picture for the species cards
-                        db.set_label_photo(conn, label_id, cards.save_label_photo(frame, label_id))
-                    if (video.site and sightings.needs_alert(site_df, name)
-                            and sightings.is_first_sighting(conn, video.site, name, label_id)):
-                        st.session_state["new_arrival"] = {
-                            "label_id": label_id, "species": name, "site": video.site, "video_id": vid,
-                            "filename": video.filename, "time_s": float(proof),
-                            "survey_date": sightings.survey_day(video)}
-                    st.toast(f"Saved {species.common_name(site_df, name)} x{count}")
-                    st.rerun()
-
-        saved = db.query(conn, "SELECT * FROM labels WHERE event_id = ?", (int(ev.id),))
-        for r in saved.itertuples():
-            row = st.columns([4, 1])
-            tag = species.badge(species.species_category(site_df, r.species))
-            row[0].markdown(f"Saved: {species.common_name(site_df, r.species)} x{r.count} {tag}")
-            if row[1].button("Remove", key=f"del_{r.id}"):
-                db.delete_label(conn, int(r.id))
-                st.rerun()
-
-        b = st.columns(2)
-        if b[0].button("Done", disabled=saved.empty, shortcut="Mod+Shift+Enter",
-                       help="Done with this moment: every species in it is saved"):
-            db.set_event_status(conn, int(ev.id), "reviewed")
-            st.rerun()
-        if b[1].button("Nothing here", shortcut="Mod+Shift+X",
-                       help="No animal in this moment (weed, sediment, light flicker...)"):
-            db.set_event_status(conn, int(ev.id), "false_alarm")
-            st.rerun()
-        st.caption("Keyboard: Ctrl/Cmd+Enter save · Ctrl/Cmd+Shift+Enter done · "
-                   "Ctrl/Cmd+Shift+X nothing here · PageUp/PageDown move")
+                                      placeholder="Start typing a name")
+                other = st.text_input("Not on the list? Type it here", key=f"other_{ev.id}")
+                proof = st.radio("Which picture shows that many?", proof_options, horizontal=True,
+                                 format_func=lambda t: ("busiest, " if t == moments[0] else "") + fmt_time(t))
+                note = st.text_input("Note (optional)")
+                if st.form_submit_button("Save this species", type="primary", shortcut="Mod+Enter"):
+                    name = (other or "").strip() or choice
+                    if not name:
+                        st.error("Pick a species or type one.")
+                    else:
+                        pick(name, proof=proof, note=note)
+                        st.rerun()
 
 
 # ---------------------------------------------------------------- 3 · report
@@ -843,7 +942,7 @@ elif page.startswith("3"):
     minutes = minutes_by_label(segments.to_dict("records"))
 
     st.download_button("Download report (one file, with pictures)", build_report_html(conn, vid),
-                       f"seasift_report_{video.filename.rsplit('.', 1)[0]}.html", mime="text/html",
+                       f"seasearch_report_{video.filename.rsplit('.', 1)[0]}.html", mime="text/html",
                        type="primary")
     st.caption("Opens in any browser, even offline. To make a PDF: open it and press Ctrl/Cmd+P.")
 
@@ -1002,7 +1101,7 @@ elif page.startswith("4"):
 elif page.startswith("5"):
     st.title("Count frames (MeanCount)")
     st.write("Coastal Action's video analysis protocol: equally spaced frames, each counted by a person. "
-             "SeaSift picks the frames, adds up your dots, and writes MeanCount and the count sheet. No AI.")
+             "seaSEArch picks the frames, adds up your dots, and writes MeanCount and the count sheet. No AI.")
     top = st.columns([3, 1, 1.4], vertical_alignment="bottom")
     with top[0]:
         video = pick_video("count_video")
@@ -1040,7 +1139,7 @@ elif page.startswith("5"):
         st.stop()
 
     qc_mode = top[2].toggle("Quality check (blind recount)", key=f"qc_{vid}",
-                            help="Count some frames again without seeing the first count. SeaSift compares the "
+                            help="Count some frames again without seeing the first count. seaSEArch compares the "
                                  f"two counts (they should differ by less than {config.QC_MAX_DIFF_PCT:.0f}%).")
     if qc_mode and not subs.qc.any():
         if not subs.done.all():

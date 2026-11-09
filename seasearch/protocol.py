@@ -8,7 +8,7 @@ From their DRAFT FFH Video Analysis Protocol:
   - quality check: at least 10% of frames counted again, blind, by a second person;
     the two counts should differ by less than 6%
 
-SeaSift does the bookkeeping: it picks the frames, shows them enhanced with a grid, lets you
+seaSEArch does the bookkeeping: it picks the frames, shows them enhanced with a grid, lets you
 click each fish, adds everything up and writes their spreadsheet. People still do the counting.
 """
 import math

@@ -1,4 +1,4 @@
-"""Enhanced video clips of an event, with orange boxes where SeaSift saw movement.
+"""Enhanced video clips of an event, with orange boxes where seaSEArch saw movement.
 
 Used by the Review page ("Play this event as video") and tools/make_demo_clip.py.
 Classical computer vision only: the same motion triage and enhancement as the rest of the app.
@@ -57,7 +57,7 @@ def side_by_side(original, better, score, blocked):
     both = cv2.hconcat([original, better])
     margin = max(10, both.shape[0] // 30)
     put_label(both, "Original", margin, margin * 2)
-    put_label(both, "Enhanced by SeaSift (orange = movement)", original.shape[1] + margin, margin * 2)
+    put_label(both, "Enhanced by seaSEArch (orange = movement)", original.shape[1] + margin, margin * 2)
     put_label(both, f"Footage quality {score:.0f}/100: {label_for(score, blocked)}",
               margin, both.shape[0] - margin)
     return both

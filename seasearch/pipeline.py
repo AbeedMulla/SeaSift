@@ -1,9 +1,9 @@
 """Process one survey video from start to finish.
 
 From the command line:
-    python -m seasift.pipeline data/videos/test_murky.mp4
-    python -m seasift.pipeline my_clip.mp4 --site coastal_eelgrass_example --ai
-    python -m seasift.pipeline --all          # every new video in data/videos, one after another
+    python -m seasearch.pipeline data/videos/test_murky.mp4
+    python -m seasearch.pipeline my_clip.mp4 --site coastal_eelgrass_example --ai
+    python -m seasearch.pipeline --all          # every new video in data/videos, one after another
 """
 import argparse
 import datetime
@@ -109,9 +109,92 @@ def crop_with_margin(frame, x1, y1, x2, y2, margin=0.1):
     return frame[y1:y2, x1:x2]
 
 
+def find_scenery(rows):
+    """Which AI boxes are scenery, not fish? Returns their positions in rows.
+
+    The fish detector sometimes takes something that never moves (the bands on a measuring pole,
+    a rock) for a fish, and finds it again in every moment. Fish move, so a box that sits in the
+    same spot in SCENERY_MOMENTS different moments is scenery.
+    rows: dicts with event_id, x1, y1, x2, y2.
+    """
+    if not rows:
+        return set()
+    b = np.array([[r["x1"], r["y1"], r["x2"], r["y2"]] for r in rows], dtype=float)
+    w = np.clip(np.minimum(b[:, None, 2], b[None, :, 2]) - np.maximum(b[:, None, 0], b[None, :, 0]), 0, None)
+    h = np.clip(np.minimum(b[:, None, 3], b[None, :, 3]) - np.maximum(b[:, None, 1], b[None, :, 1]), 0, None)
+    overlap = w * h
+    area = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+    same_spot = overlap >= config.SCENERY_IOU * np.maximum(area[:, None] + area[None, :] - overlap, 1e-9)
+    events = np.array([r["event_id"] for r in rows])
+    return {i for i in range(len(rows)) if len(set(events[same_spot[i]])) >= config.SCENERY_MOMENTS}
+
+
+def mark_scenery(conn, video_id):
+    """For videos processed before this check existed: mark their scenery boxes."""
+    rows = db.query(conn, "SELECT id, event_id, x1, y1, x2, y2 FROM detections "
+                    "WHERE video_id = ? AND IFNULL(source, 'detector') = 'detector'", (video_id,)).to_dict("records")
+    db.set_detection_flag(conn, [rows[i]["id"] for i in find_scenery(rows)], "scenery")
+
+
+def box_overlap(a, b):
+    """How much two (x1, y1, x2, y2) boxes overlap: 0 = apart, 1 = the same box."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - w * h
+    return w * h / union if union > 0 else 0.0
+
+
+def guesses(suggester, crop_path, ev, species_df, group="all"):
+    """The species guesses and review flag for one crop."""
+    top = (suggester.suggest(crop_path, group=group) if suggester else []) + [("", 0.0)] * 3
+    if suggester:
+        flag = decide_flag(top[0][0], top[0][1], ev["visibility"], species_df)
+    else:  # detector only: a person picks the species
+        flag = "unidentifiable" if ev["visibility"] < config.MURKY_SCORE else "fish"
+    return {"species_1": top[0][0], "score_1": top[0][1], "species_2": top[1][0], "score_2": top[1][1],
+            "species_3": top[2][0], "score_3": top[2][1], "flag": flag}
+
+
+def movement_rows(reader, suggester, ev, video_id, species_df, folder, fish_rows):
+    """Crabs and shrimp: ask BioCLIP about each thing that moved at the busiest moment.
+
+    The fish detector only boxes fish. Movement boxes come from the scan, so this looks at
+    whatever moved, and keeps only what BioCLIP calls a crab or shrimp: fish are the detector's
+    job, and the rest is sand, seaweed or murky water.
+    """
+    peak = round(float(ev["peak_s"]), 2)
+    frame = reader.at(peak)
+    if frame is None:
+        return []
+    from .ai import INVERTEBRATE_KINDS
+    height, width = frame.shape[:2]
+    fish_boxes = [(r["x1"], r["y1"], r["x2"], r["y2"]) for r in fish_rows if abs(r["frame_s"] - peak) < 0.05]
+    rows = []
+    for k, (x, y, w, h) in enumerate(json.loads(ev.get("boxes") or "[]")):
+        box = (x * width, y * height, (x + w) * width, (y + h) * height)
+        if any(box_overlap(box, fish) > 0.3 for fish in fish_boxes):
+            continue  # the fish detector already has this one
+        crop = crop_with_margin(frame, *box, margin=0.2)
+        if crop.size == 0:
+            continue
+        crop_path = folder / f"event{ev['id']}_moved{k}.jpg"
+        cv2.imwrite(str(crop_path), crop)
+        kind, score = suggester.kind(crop_path)
+        if kind not in INVERTEBRATE_KINDS:
+            continue
+        rows.append({"event_id": ev["id"], "video_id": video_id, "frame_s": peak,
+                     "x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3], "det_conf": score,
+                     "crop_path": config.stored_path(crop_path), "source": "movement",
+                     **guesses(suggester, crop_path, ev, species_df, group="invertebrate")})
+    return rows
+
+
 def run_ai_tier(conn, video_id, path, events, species_df, progress=None):
-    """Tier 1: detect fish inside events only, then suggest species and flag them."""
-    from .ai import FishDetector, SpeciesSuggester  # heavy imports only when AI is used
+    """Tier 1: inside events only. Fish detector boxes, plus crabs and shrimp from what moved,
+    then species suggestions and flags. Boxes that are scenery or not an animal are hidden."""
+    from .ai import INVERTEBRATE_KINDS, FishDetector, SpeciesSuggester  # heavy imports only when AI is used
 
     detector = FishDetector()
     suggester = SpeciesSuggester(species_df) if config.SPECIES_SUGGESTIONS else None
@@ -121,7 +204,8 @@ def run_ai_tier(conn, video_id, path, events, species_df, progress=None):
     with FrameReader(path) as reader:
         for i, ev in enumerate(events):
             if progress:
-                progress(0.9 + 0.1 * i / max(1, len(events)), f"AI: event {i + 1} of {len(events)}")
+                progress(0.9 + 0.1 * i / max(1, len(events)), f"AI: moment {i + 1} of {len(events)}")
+            fish_rows = []
             for t in detection_times(ev):
                 frame = reader.at(t)
                 if frame is None:
@@ -130,22 +214,23 @@ def run_ai_tier(conn, video_id, path, events, species_df, progress=None):
                     crop = crop_with_margin(frame, x1, y1, x2, y2)
                     if crop.size == 0:
                         continue
-                    crop_path = folder / f"event{ev['id']}_t{t:.1f}_{len(rows)}.jpg"
+                    crop_path = folder / f"event{ev['id']}_t{t:.1f}_{len(rows) + len(fish_rows)}.jpg"
                     cv2.imwrite(str(crop_path), crop)
-                    top = (suggester.suggest(crop_path) if suggester else []) + [("", 0.0)] * 3
-                    if suggester:
-                        flag = decide_flag(top[0][0], top[0][1], ev["visibility"], species_df)
-                    else:  # detector only: a person picks the species
-                        flag = "unidentifiable" if ev["visibility"] < config.MURKY_SCORE else "fish"
-                    rows.append({
-                        "event_id": ev["id"], "video_id": video_id, "frame_s": t,
-                        "x1": x1, "y1": y1, "x2": x2, "y2": y2, "det_conf": conf,
-                        "crop_path": config.stored_path(crop_path),
-                        "species_1": top[0][0], "score_1": top[0][1],
-                        "species_2": top[1][0], "score_2": top[1][1],
-                        "species_3": top[2][0], "score_3": top[2][1],
-                        "flag": flag,
-                    })
+                    kind = suggester.kind(crop_path)[0] if suggester else "fish"
+                    group = "invertebrate" if kind in INVERTEBRATE_KINDS else "fish" if suggester else "all"
+                    row = {"event_id": ev["id"], "video_id": video_id, "frame_s": t,
+                           "x1": x1, "y1": y1, "x2": x2, "y2": y2, "det_conf": conf,
+                           "crop_path": config.stored_path(crop_path), "source": "detector",
+                           **guesses(suggester, crop_path, ev, species_df, group)}
+                    if kind == "none":
+                        row["flag"] = "false_alarm"   # sand, seaweed, rope...: hidden on the Review page
+                    fish_rows.append(row)
+            rows += fish_rows
+            if suggester and config.LOOK_AT_MOVEMENT:
+                rows += movement_rows(reader, suggester, ev, video_id, species_df, folder, fish_rows)
+    detector_rows = [i for i, r in enumerate(rows) if r["source"] == "detector"]
+    for j in find_scenery([rows[i] for i in detector_rows]):
+        rows[detector_rows[j]]["flag"] = "scenery"
     db.add_detections(conn, rows)
     return rows
 
@@ -237,7 +322,7 @@ def print_summary(s):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Process survey videos with SeaSift.")
+    parser = argparse.ArgumentParser(description="Process survey videos with seaSEArch.")
     parser.add_argument("video", nargs="?", help="one video file (or use --all)")
     parser.add_argument("--all", action="store_true",
                         help="process every new video in data/videos, one after another")
